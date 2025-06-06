@@ -203,26 +203,29 @@ func (b *BoxInstance) SelectOutbound(tag string) bool {
 	return false
 }
 
-// UrlTest 以 HTTP 模式测延迟。
+// UrlTest 以 HTTP 模式测试延迟。
 func UrlTest(i *BoxInstance, link string, timeout int32) (latency int32, err error) {
     defer device.DeferPanicToError("box.UrlTest", func(err_ error) { err = err_ })
+
+    // mainInstance 为 nil 说明对主实例测速
     if i == nil {
-        // 对当前主实例测速
         return speedtest.UrlTest(
             boxapi.CreateProxyHttpClient(mainInstance.Box),
             link,
             timeout,
-            speedtest.UrlTestStandard_HTTP, // ← 恢复为 HTTP 延迟
+            speedtest.UrlTestStandard(1), // 1 == HTTP 模式
         )
     }
-    // 对指定实例测速
+
+    // 否则对指定实例测速
     return speedtest.UrlTest(
         boxapi.CreateProxyHttpClient(i.Box),
         link,
         timeout,
-        speedtest.UrlTestStandard_HTTP, // ← 恢复为 HTTP 延迟
+        speedtest.UrlTestStandard(1), // 1 == HTTP 模式
     )
 }
+
 
 
 var protectCloser io.Closer
