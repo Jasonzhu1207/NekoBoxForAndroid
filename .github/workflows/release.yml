@@ -1,9 +1,5 @@
-# .github/workflows/release.yml — 完整优化版
-# 目标：
-# 1. 避免 Gradle Daemon 在 2 vCPU / 7 GB RAM 的 ubuntu-latest Runner 上被 OOM 杀掉。
-# 2. 默认仍可一键输入 tag / publish / play 参数。
-# 3. 所有 Gradle 步都： --no-daemon + 限制 JVM Heap + 限制并发。
-# 4. 其余逻辑保持原有，方便直接覆盖。
+# .github/workflows/release.yml — OOM极限防爆优化版
+# 极致稳：串行 + 低堆 + 关缓存，确保2核7G机器可编过
 
 name: Release Build
 
@@ -84,15 +80,16 @@ jobs:
       - name: Gradle Build
         env:
           BUILD_PLUGIN: none
-          # 限制 worker 并发，防止小内存机器线程过多
-          GRADLE_OPTS: "-Dorg.gradle.workers.max=2"
+          GRADLE_OPTS: "-Dorg.gradle.workers.max=1 -Dkotlin.incremental=false"
         run: |
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
           echo "ndk.dir=${ANDROID_HOME}/ndk/25.0.8775105" >> local.properties
           export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
           ./run init action gradle
-          # 关闭 Daemon + 限制 JVM 堆 4G + UTF-8
-          ./gradlew --no-daemon -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8" app:assembleOssRelease
+          ./gradlew --no-daemon \
+            --no-configuration-cache --no-build-cache \
+            -Dorg.gradle.jvmargs="-Xmx2g -Dfile.encoding=UTF-8" \
+            app:assembleOssRelease
           APK=$(find app/build/outputs/apk -name '*arm64-v8a*.apk' | head -n1)
           APK=$(dirname "$APK")
           echo "APK=$APK" >> $GITHUB_ENV
@@ -161,13 +158,16 @@ jobs:
 
       - name: Gradle Build (Play)
         env:
-          GRADLE_OPTS: "-Dorg.gradle.workers.max=2"
+          GRADLE_OPTS: "-Dorg.gradle.workers.max=1 -Dkotlin.incremental=false"
         run: |
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
           echo "ndk.dir=${ANDROID_HOME}/ndk/25.0.8775105" >> local.properties
           export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
           ./run init action gradle
-          ./gradlew --no-daemon -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8" bundlePlayRelease
+          ./gradlew --no-daemon \
+            --no-configuration-cache --no-build-cache \
+            -Dorg.gradle.jvmargs="-Xmx2g -Dfile.encoding=UTF-8" \
+            bundlePlayRelease
 
       - uses: actions/upload-artifact@v4
         with:
