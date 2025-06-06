@@ -1,4 +1,12 @@
+# .github/workflows/release.yml — 完整优化版
+# 目标：
+# 1. 避免 Gradle Daemon 在 2 vCPU / 7 GB RAM 的 ubuntu-latest Runner 上被 OOM 杀掉。
+# 2. 默认仍可一键输入 tag / publish / play 参数。
+# 3. 所有 Gradle 步都： --no-daemon + 限制 JVM Heap + 限制并发。
+# 4. 其余逻辑保持原有，方便直接覆盖。
+
 name: Release Build
+
 on:
   workflow_dispatch:
     inputs:
@@ -6,11 +14,12 @@ on:
         description: "Release Tag"
         required: true
       publish:
-        description: "Publish: If want ignore"
+        description: "Publish: If want ignore (填 y 跳过发布)"
         required: false
       play:
-        description: "Play: If want ignore"
+        description: "Play: If want ignore (填 y 跳过上传 Google Play)"
         required: false
+
 jobs:
   libcore:
     name: Native Build (LibCore)
@@ -18,10 +27,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Golang Status
         run: find buildScript libcore/*.sh | xargs cat | sha1sum > golang_status
+
       - name: Libcore Status
         run: git ls-files libcore | xargs cat | sha1sum > libcore_status
+
       - name: LibCore Cache
         id: cache
         uses: actions/cache@v4
@@ -29,53 +41,67 @@ jobs:
           path: |
             app/libs/libcore.aar
           key: ${{ hashFiles('.github/workflows/*', 'golang_status', 'libcore_status') }}
+
       - name: Install Golang
         if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/setup-go@v5
         with:
           go-version: ^1.24
+
       - name: Native Build
         if: steps.cache.outputs.cache-hit != 'true'
         run: ./run lib core
+
   build:
     name: Build OSS APK
     runs-on: ubuntu-latest
-    needs:
-      - libcore
+    needs: libcore
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Golang Status
         run: find buildScript libcore/*.sh | xargs cat | sha1sum > golang_status
+
       - name: Libcore Status
         run: git ls-files libcore | xargs cat | sha1sum > libcore_status
+
       - name: LibCore Cache
         uses: actions/cache@v4
         with:
           path: |
             app/libs/libcore.aar
           key: ${{ hashFiles('.github/workflows/*', 'golang_status', 'libcore_status') }}
+
       - name: Gradle cache
         uses: actions/cache@v4
         with:
-          path: ~/.gradle
-          key: gradle-oss-${{ hashFiles('**/*.gradle.kts') }}
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-oss-${{ hashFiles('**/*.gradle.kts', 'gradle/wrapper/gradle-wrapper.properties') }}
+
       - name: Gradle Build
         env:
           BUILD_PLUGIN: none
+          # 限制 worker 并发，防止小内存机器线程过多
+          GRADLE_OPTS: "-Dorg.gradle.workers.max=2"
         run: |
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
           echo "ndk.dir=${ANDROID_HOME}/ndk/25.0.8775105" >> local.properties
           export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
           ./run init action gradle
-          ./gradlew app:assembleOssRelease
-          APK=$(find app/build/outputs/apk -name '*arm64-v8a*.apk')
-          APK=$(dirname $APK)
+          # 关闭 Daemon + 限制 JVM 堆 4G + UTF-8
+          ./gradlew --no-daemon -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8" app:assembleOssRelease
+          APK=$(find app/build/outputs/apk -name '*arm64-v8a*.apk' | head -n1)
+          APK=$(dirname "$APK")
           echo "APK=$APK" >> $GITHUB_ENV
+
       - uses: actions/upload-artifact@v4
         with:
           name: APKs
           path: ${{ env.APK }}
+
   publish:
     name: Publish Release
     if: github.event.inputs.publish != 'y'
@@ -84,11 +110,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Donwload Artifacts
+
+      - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
           name: APKs
           path: artifacts
+
       - name: Release
         run: |
           wget -O ghr.tar.gz https://github.com/tcnksm/ghr/releases/download/v0.13.0/ghr_v0.13.0_linux_amd64.tar.gz
@@ -97,41 +125,51 @@ jobs:
           mkdir apks
           find artifacts -name "*.apk" -exec cp {} apks \;
           ./ghr -delete -t "${{ github.token }}" -n "${{ github.event.inputs.tag }}" "${{ github.event.inputs.tag }}" apks
+
   play:
     name: Build Play Bundle
     if: github.event.inputs.play != 'y'
     runs-on: ubuntu-latest
-    needs:
-      - libcore
+    needs: libcore
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Golang Status
         run: find buildScript libcore/*.sh | xargs cat | sha1sum > golang_status
+
       - name: Libcore Status
         run: git ls-files libcore | xargs cat | sha1sum > libcore_status
+
       - name: LibCore Cache
         uses: actions/cache@v4
         with:
           path: |
             app/libs/libcore.aar
           key: ${{ hashFiles('.github/workflows/*', 'golang_status', 'libcore_status') }}
+
       - name: Gradle cache
         uses: actions/cache@v4
         with:
-          path: ~/.gradle
-          key: gradle-play-${{ hashFiles('**/*.gradle.kts') }}
-      - name: Checkout Library
-        run: |
-          git submodule update --init 'app/*'
-      - name: Gradle Build
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-play-${{ hashFiles('**/*.gradle.kts', 'gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Checkout Library Submodules
+        run: git submodule update --init 'app/*'
+
+      - name: Gradle Build (Play)
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.workers.max=2"
         run: |
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
           echo "ndk.dir=${ANDROID_HOME}/ndk/25.0.8775105" >> local.properties
           export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
           ./run init action gradle
-          ./gradlew bundlePlayRelease
-      - uses: actions/upload-artifact@v3
+          ./gradlew --no-daemon -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8" bundlePlayRelease
+
+      - uses: actions/upload-artifact@v4
         with:
           name: AAB
           path: app/build/outputs/bundle/playRelease/app-play-release.aab
